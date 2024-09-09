@@ -1,0 +1,592 @@
+---
+title: "MODULO VI: Machine Learning II: Modelos para La Predicción y Clasificación"
+author: "Hugo Donoso Reinoso"
+date: "2024-09-08"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+install.packages("caret")
+install.packages("e1071")
+install.packages("foreign")
+install.packages("dplyr")
+install.packages("ROSE", dependencies = TRUE)
+install.packages("reshape2")
+library(ROSE)
+library(foreign)
+library(dplyr)
+library(caret)
+library(ROCR)
+library(e1071)
+library(reshape2)
+```
+```{r}
+datosnv<- read.spss("E:\\Betametrica\\MODULO VI\\ENV_2017.sav",
+                  use.value.labels = F,
+                  to.data.frame = T)
+ 
+table(datosnv$prov_nac)
+str(datosnv$prov_nac)
+
+names(datosnv)
+
+datosnv$prov_nac<- as.numeric(as.character((datosnv$prov_nac)))
+str(datosnv$prov_nac)
+```
+```{r}
+ 
+nuevadata<-datosnv %>% 
+  filter(prov_nac==13)  %>%
+  select(peso,
+         talla,
+         sem_gest,
+         sexo,
+         edad_mad,
+         sabe_leer,
+         con_pren) %>%
+ 
+    filter(
+  peso!=99,
+  talla!=99,
+  sem_gest!=99,
+  con_pren!=99,
+  sabe_leer!=9)%>% 
+mutate(peso=if_else(peso>2500,1,0),
+       sexo=if_else(sexo==1,0,1),
+       sabe_leer=if_else(sabe_leer==1,1,0),
+       con_pre=if_else(con_pren>=7,1,0),
+       edad2= edad_mad ^ 2)    
+```
+Hemos manipulado la infomración o depurado vamos a realizar un histograma
+de la variable peso donde se presentara solo 1 y 0
+
+```{r}
+hist(nuevadata$peso)
+str(nuevadata$peso)
+```
+A la variable peso se la categoriza como factor, se convierte en dual
+es decir 1= peso adecuado; 0=peso no adecuado.
+
+```{r}
+nuevadata$peso <-factor(nuevadata$peso)
+nuevadata<- nuevadata %>%
+    mutate(peso=recode_factor(
+      peso,
+      '0'="no adecuado",
+      '1'= "adecuado"))
+
+# se fija una semilla
+set.seed(1234)
+
+#muestra de entrenamiento
+
+entrenamiento <- createDataPartition(nuevadata$peso,
+                                     p=0.10, list= F)
+
+#Modelo SVM con muestra de entrenamiento (me)
+
+modelo <- svm(peso  ~talla+sem_gest+sexo+
+                edad_mad+edad2+sabe_leer,
+              data=nuevadata[entrenamiento,],
+              kernel="linear",
+                     cost= 10,scale=T,probability=TRUE )
+
+#Obtención de vectores de soporte
+
+modelo$index
+
+#Obtención del término independiente
+modelo$rho
+
+
+
+```
+
+Recuperar los coficientes que usan para multiplicar 
+cada observación y obtener el vector perpendicular al plano
+
+```{r}
+modelo$coefs
+```
+
+
+
+```{r}
+# Evaluación del modelo
+
+ajustados<- predict(modelo,
+                    nuevadata[entrenamiento,],
+                    type="prob")
+# se clasifica con un punto de corte 
+# de 0.5
+
+#Forma larga de matriz de clasificación
+# matriz de confusión
+
+ct<- table(nuevadata[entrenamiento,]$peso,
+           ajustados,
+           dnn= c("Actual", "Predicho"))
+diag(prop.table(ct,1))
+sum(diag(prop.table(ct)))
+
+confusionMatrix(nuevadata$peso[entrenamiento],
+                ajustados,
+                dnn=c("Actual","Predicho"),
+                levels(ajustados)[2])
+
+plot(modelo, 
+     data= nuevadata[entrenamiento,],
+     talla  ~sem_gest)
+```
+
+
+## Optimizar - tunear el modelo (lamejor opción)
+
+
+```{r}
+
+modelo.tuneado<- tune(svm,
+                      peso  ~.,
+                      data=nuevadata[entrenamiento,],
+                      ranges = list(cost=c(0.001,0.01,0.1,1.5,10,50)),
+                      kernel="linear",
+                      scale=T,
+                      probability=TRUE)
+
+summary(modelo.tuneado)
+```
+
+
+```{r}
+ggplot(data=modelo.tuneado$performances,
+       aes(x=cost, y=error))+
+  geom_line()+
+  geom_point()+
+labs(title="error de validación vs hiperparametro c")+
+  theme_bw()+
+  theme(plot.title = element_text(hjust = 0.5))
+
+mejor.modelo<- modelo.tuneado$best.model
+summary(mejor.modelo)
+
+
+
+```
+RESPUESTA: La optimización indica que el modelo mejor tiene costos de 1.5
+
+
+```{r}
+#registramos Vectores de soporte
+head(mejor.modelo$index,100)
+
+plot(mejor.modelo,
+     data=nuevadata[entrenamiento,],
+     talla  ~sem_gest)
+
+# validación del mejor modelo
+
+ajustados.mejor.modelo<- predict(mejor.modelo,
+                                 nuevadata[entrenamiento,],
+                                 type="prob" ,
+                                 probability = T)
+
+# captura de las probabilidades
+str(ajustados.mejor.modelo)
+
+#Se realizar un HEAD para determinar el número de la clase objetivo
+# clase de objetivo adecuado =1;  clase de objetivo inadecuado = 2
+
+
+head(attr(ajustados.mejor.modelo, "probabilities"),5)
+
+
+```
+
+
+```{r}
+# Matriz de confusión o clasificación
+#Se determina el vector de probabilidade para realizar adecuadamente las pruebas.
+
+levels(ajustados.mejor.modelo)
+table(attr(ajustados.mejor.modelo, "probabilities")[,1]>0.5,
+      nuevadata$peso[entrenamiento])
+levels(nuevadata$peso)
+
+confusionMatrix(ajustados.mejor.modelo,
+                nuevadata$peso[entrenamiento],
+                positive = levels(nuevadata$peso)[2])
+
+
+# CURVAS ROC
+
+pred<- prediction(attr(ajustados.mejor.modelo,
+                       "probabilities")[,2],
+                  nuevadata$peso[entrenamiento])
+
+perf<- performance(pred, "tpr", "fpr")
+plot(perf,colorize=T,lty=3)
+abline(0,1,col="red")
+
+#La curva ROC sirve para valorar que el modelo tiene el adecuado rendimiento donde se ve que modelo mejor balancea los resultado
+
+# Area bajo la curva
+
+aucmodelo1<- performance(pred, measure="auc")
+aucmodelo1<- aucmodelo1@y.values[(1)]
+aucmodelo1
+
+#Mientras más cercano esté a 1 mejor es el modelo
+
+# Sensitividad y especificadidad
+plot(performance(pred,
+                 measure="sens",
+                 x.measure="spec",
+                 colorize=T))
+
+# Punto de corte Optimo
+perf1<- performance(pred, "sens", "spec")
+sen<- slot(perf1,"y.values"[[1]])
+esp<- slot(perf1,"x.values"[[1]])
+alf<- slot(perf1,"alpha.values"[[1]])
+mat<-data.frame(alf,sen,esp)
+
+library(reshape2)
+names(mat)[1] <-"alf"
+names(mat)[2] <-"sen"
+names(mat)[3] <-"esp"
+
+m<- melt(mat, id=c("alf"))
+p1<-ggplot(m,
+           aes(alf,value,group=variable,
+               colour=variable))+
+  geom_line(linewidth=1.2)+
+  labs(title="Punto de corte Optimo para SMV",
+       x="cut - off",
+       y="")
+
+p1
+
+# La figura expresa un no adecuado punto de corte.
+
+# Se aplica otro enfoque para el cut - off
+
+max.accuracy <- performance(pred,measure="acc")
+plot(max.accuracy)
+
+indice<- which.max(slot(max.accuracy, "y.values")[[1]])
+acc<- slot(max.accuracy, "y.values")[[1]][indice]
+cutoff<- slot(max.accuracy, "x.values")[[1]][indice]
+print(c(accuracy=acc,
+      cutoff=cutoff))
+
+```
+
+
+Otro enfoque
+```{r}
+
+install.packages("pROC", dependencies=T)
+library(pROC)
+
+prediccionescutoff <- attr(ajustados.mejor.modelo,
+                           "probabilities")[,1]
+curvaroc <- plot.roc(nuevadata$peso[entrenamiento],
+                    as.vector(prediccionescutoff),
+                    precent=TRUE,
+                    ci= TRUE,
+                    print.auc=TRUE,
+                    threholds="best",
+                    print.thres="best")
+
+#RESULTADO: maxima distancia de las dos curvas que es 0.928
+
+
+#Prediciendo con SVM
+
+newdata<- head(nuevadata,5)
+str(newdata)
+
+#Predecir dentro de la muestra
+# RESPUESTA: El punto de corte por defecto es de 0.5
+
+predict(mejor.modelo,newdata)
+pronistico1<-predict(mejor.modelo,newdata)
+ p.probabilidades <- predict(mejor.modelo,
+                             newdata,
+                             probability=TRUE)
+ p.probabilidades
+ 
+ names(newdata)
+ 
+ newdata2 <- data.frame(talla=45,
+                        sem_gest=38,
+                        sexo=1,
+                        edad_mad= 30,
+                        sabe_leer=1,
+                        con_pren=1,
+                        edad2=900)
+
+ names(newdata2)
+ newdata2 <- newdata2 %>%
+   mutate(con_pre = if_else(con_pren >= 7, 1, 0))
+pronostico2<- predict(mejor.modelo,newdata2, probability=TRUE)
+pronostico2
+
+predict(mejor.modelo,newdata2)
+```
+
+Evaluando punto de corte sugerido
+
+```{r}
+
+
+#Definición del punto de corte
+umbral <- as.numeric(cutoff)
+ 
+table(attr(ajustados.mejor.modelo,
+           "probabilities")[,1]>umbral,
+      nuevadata$peso[entrenamiento])
+
+head(attr(ajustados.mejor.modelo,
+          "probabilities"))
+
+#Seleccionamos la probabilidad objetivo
+prediccionescutoff<- attr(ajustados.mejor.modelo,
+                          "probabilities")[,1]
+
+str(prediccionescutoff)
+
+prediccionescutoff<- as.numeric(prediccionescutoff)
+
+predcut<- factor(ifelse(prediccionescutoff>umbral, 1,0))
+
+matrizpuntocorte <- data.frame(real=nuevadata$peso[entrenamiento],
+                               predicho=predcut)
+matrizpuntocorte<- matrizpuntocorte %>% mutate(predicho=recode_factor(predicho,
+                                                                      '0'="no adecuado",
+                                                                      '1'= "adecuado"))
+matrizpuntocorte
+
+
+confusionMatrix(matrizpuntocorte$predicho,
+                matrizpuntocorte$real,
+                positive="adecuado")
+
+
+
+train_data<-nuevadata[entrenamiento,]
+
+table(train_data$peso)
+
+#Oversample
+
+2168*2
+overs<-ovun.sample(peso~. ,
+                   data=train_data,
+                   method = "over", N=4336) $data
+table(overs$peso)
+
+230*2
+
+unders<-ovun.sample(peso~. ,
+                   data=train_data,
+                   method = "under", N=460)$data
+table(unders$peso)
+
+# ROSE: Método sintético
+
+roses<- ROSE(peso ~.,
+             data=train_data,
+             seed=1)$data
+table(roses$peso)
+
+```
+
+3 tecnicas de remuestreo para desbalance muestral 
+
+```{r}
+
+
+# Validación cruzada del modelo remuestreado
+modelo.over <- tune(svm, peso ~ ., data=overs,
+                                    ranges=list(cost=c(0.001, 0.01, 0.1, 1.5, 10, 50)), 
+                                    kernel="linear", scale=TRUE, probability=TRUE)
+
+summary(modelo.over)
+mejor.modelo.over<- modelo.over$best.model
+
+
+
+modelo.under <- tune(svm, peso ~ ., data=unders,
+                    ranges=list(cost=c(0.001, 0.01, 0.1, 1.5, 10, 50)), 
+                    kernel="linear", scale=TRUE, probability=TRUE)
+summary(modelo.under)
+mejor.modelo.under<- modelo.under$best.model
+
+
+```
+
+
+```{r}
+modelo.rose <- tune(svm, peso ~ ., data=roses,
+                     ranges=list(cost=c(0.001, 0.01, 0.1, 1.5, 10, 50)), 
+                     kernel="linear", scale=TRUE, probability=TRUE)
+
+summary(modelo.rose)
+mejor.modelo.rose<- modelo.rose$best.model
+```
+
+
+
+Evalución del modelo
+```{r}
+
+ajustadosover<- predict(mejor.modelo.over,
+                        overs,
+                        type="prob",
+                        probability=T)
+
+
+ajustadosunder<- predict(mejor.modelo.under,
+                      unders,
+                        type="prob",
+                        probability=T)
+
+ajustadosrose<- predict(mejor.modelo.rose,
+                        roses,
+                        type="prob",
+                        probability=T)
+
+```
+
+
+
+
+
+```{r}
+confusionMatrix(overs$peso,ajustadosover,
+                dnn=c("Actuales","Predichos"),
+                levels(ajustadosover)[1])
+
+
+
+confusionMatrix(unders$peso,ajustadosunder,
+                dnn=c("Actuales","Predichos"),
+                levels(ajustadosunder)[1])
+
+
+
+confusionMatrix(roses$peso,ajustadosrose,
+                dnn=c("Actuales","Predichos"),
+                levels(ajustadosrose)[1])
+
+confusionMatrix(ajustados.mejor.modelo,
+                nuevadata$peso[entrenamiento],
+                positive=levels(nuevadata$peso)[2])
+```
+
+
+
+Curvas ROC para los modelos
+```{r}
+
+
+predover<- prediction(attr(ajustadosover,
+                           "probabilities")[,2],
+                      overs$peso)
+
+predrose<- prediction(attr(ajustadosrose,
+                           "probabilities")[,2],
+                      roses$peso)
+
+predrose<- prediction(attr(ajustadosunder,
+                           "probabilities")[,2],
+                      unders$peso)                     
+                
+roc.curve(overs$peso,
+          attr(ajustadosover,
+               "probabilities")[,2],
+        col="violet"  )
+
+roc.curve(unders$peso,
+          attr(ajustadosunder,
+               "probabilities")[,2],
+          col="black",add.roc=T  )
+                      
+roc.curve(roses$peso,
+          attr(ajustadosrose,
+               "probabilities")[,2],
+          col="red",add.roc=T  )                     
+                      
+#La mejor curva es OVER tiene la mayor area bajo la curva. 
+#AUC: Over = 0.866
+#AUC: under = 0.863
+#AUC: Rose = 0.811
+#El mejor método es OVER  
+```
+
+
+
+Remuestreo
+```{r}
+
+data_balanced <- ROSE(peso ~ talla + sem_gest + sexo + edad_mad + sabe_leer + con_pren + edad2, data=nuevadata[entrenamiento,], seed=1)$data
+
+# Verificar el balance de las clases
+table(data_balanced$peso)
+
+# Modelo SVM con la data remuestreada
+modelo_remuestreado <- svm(peso ~ talla + sem_gest + sexo + edad_mad + sabe_leer + con_pren + edad2, data=data_balanced, kernel="linear", cost=10, scale=TRUE, probability=TRUE)
+
+# Validación cruzada del modelo remuestreado
+modelo_remuestreado_tuneado <- tune(svm, peso ~ ., data=data_balanced,
+                                    ranges=list(cost=c(0.001, 0.01, 0.1, 1.5, 10, 50)), 
+                                    kernel="linear", scale=TRUE, probability=TRUE)
+
+```
+
+COMPARACION DE MODELOS 
+```{r}
+
+# Curvas ROC para el modelo tuneado original
+pred_original <- prediction(attr(ajustados.mejor.modelo, "probabilities")[,2], 
+ nuevadata$peso[entrenamiento])
+
+perf_original <- performance(pred_original, "tpr", "fpr")
+
+
+
+```
+
+
+```{r}
+# Curvas ROC para el modelo remuestreado
+
+pred_remuestreado_prob <- predict(modelo_remuestreado_tuneado$best.model, 
+                                  data_balanced, probability=TRUE)
+
+pred_remuestreado <- prediction(attr(pred_remuestreado_prob, "probabilities")[,2], 
+                                data_balanced$peso)
+
+
+perf_remuestreado <- performance(pred_remuestreado, "tpr", "fpr")
+
+
+
+```
+
+
+Comparación en un solo gráfico
+```{r}
+
+plot(perf_original, col="green", main="Comparación de Curvas ROC", lty=1)
+plot(perf_remuestreado, col="red", add=TRUE, lty=2)
+legend("bottomright", legend=c("Modelo Original", "Modelo Remuestreado"), 
+       col=c("green", "red"), lty=1:2)
+```
+
+
+
+
